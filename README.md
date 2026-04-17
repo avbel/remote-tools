@@ -21,11 +21,35 @@ garbage-collected by the control plane.
 
 ## Installation
 
-One-liner — download the latest linux/amd64 build and make it executable:
+Every release ships three linux/amd64 variants. Pick whichever fits your
+environment; they behave identically at runtime.
+
+| Artifact | Size | When to use |
+|---|---|---|
+| `remote-tools-linux-amd64` | ~27 MB | Default. No decompression step. Works everywhere. |
+| `remote-tools-linux-amd64.gz` | ~10 MB | Smaller download. Adds one `gunzip` step. Zero runtime cost. |
+| `remote-tools-linux-amd64.upx` | ~7.4 MB | Smallest. Startup ~30 ms slower due to in-process decompression. May trigger AV false positives on Windows or corporate firewalls. |
+
+One-liner (plain binary):
 
 ```sh
 curl -fsSL -o remote-tools \
   https://github.com/avbel/remote-tools/releases/latest/download/remote-tools-linux-amd64 \
+  && chmod +x remote-tools
+```
+
+One-liner (gzip — smallest transfer, no runtime surprises):
+
+```sh
+curl -fsSL https://github.com/avbel/remote-tools/releases/latest/download/remote-tools-linux-amd64.gz \
+  | gunzip > remote-tools && chmod +x remote-tools
+```
+
+One-liner (UPX):
+
+```sh
+curl -fsSL -o remote-tools \
+  https://github.com/avbel/remote-tools/releases/latest/download/remote-tools-linux-amd64.upx \
   && chmod +x remote-tools
 ```
 
@@ -38,20 +62,20 @@ curl -fsSL -o remote-tools \
   && chmod +x remote-tools
 ```
 
-Verify the checksum published alongside the binary:
+Verify the checksum (one `SHA256SUMS` file covers all three variants):
 
 ```sh
-curl -fsSL -o remote-tools.sha256 \
-  https://github.com/avbel/remote-tools/releases/latest/download/remote-tools-linux-amd64.sha256
-sha256sum -c remote-tools.sha256
+curl -fsSL -o SHA256SUMS \
+  https://github.com/avbel/remote-tools/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
 ```
 
 Run straight from `/tmp` if you want to keep your working directory clean
 (nothing else touches disk outside `/tmp` anyway):
 
 ```sh
-curl -fsSL -o /tmp/remote-tools \
-  https://github.com/avbel/remote-tools/releases/latest/download/remote-tools-linux-amd64 \
+curl -fsSL https://github.com/avbel/remote-tools/releases/latest/download/remote-tools-linux-amd64.gz \
+  | gunzip > /tmp/remote-tools \
   && chmod +x /tmp/remote-tools \
   && /tmp/remote-tools --ts-authkey=tskey-... --serve-dir=/var/log
 ```
