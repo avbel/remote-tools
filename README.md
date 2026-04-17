@@ -1,5 +1,7 @@
 # remote-tools
 
+<img src="assets/logo.png" width="300" align="right" alt="remote-tools logo">
+
 A single static binary for short-lived DevOps and testing work on remote
 VPSes. Download it, run it, do your work, stop it, delete it — no root, no
 system writes outside `/tmp`, no leftover Tailscale node in your admin list.
