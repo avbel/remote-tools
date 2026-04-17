@@ -47,6 +47,15 @@ func envDefault(def string, keys ...string) string {
 	return def
 }
 
+func envDefaultInt(def int, keys ...string) int {
+	if v := envDefault("", keys...); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
 type config struct {
 	AuthKey   string
 	Hostname  string
@@ -95,13 +104,7 @@ Examples:
 		"Hostname on the tailnet")
 	serveDir := fs.String("serve-dir", envDefault("", "REMOTE_TOOLS_SERVE_DIR"),
 		"Directory to expose read-only over HTTP; empty disables the file server")
-	servePortDefault := 8080
-	if v := envDefault("", "REMOTE_TOOLS_SERVE_PORT"); v != "" {
-		if p, err := strconv.Atoi(v); err == nil {
-			servePortDefault = p
-		}
-	}
-	servePort := fs.Int("serve-port", servePortDefault,
+	servePort := fs.Int("serve-port", envDefaultInt(8080, "REMOTE_TOOLS_SERVE_PORT"),
 		"Port for the file server on the tailnet listener")
 	var exposes stringSlice
 	fs.Var(&exposes, "expose",
@@ -211,11 +214,19 @@ func run(cfg config) error {
 				runErr <- fmt.Errorf("file server: %w", err)
 			}
 		}()
+		// Graceful shutdown waits for in-flight downloads so Ctrl-C in the
+		// middle of `curl -O` doesn't truncate the file. After the grace
+		// period, Close() forces any stragglers so we don't block the
+		// tailnet Logout that follows.
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			<-ctx.Done()
-			shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
+			shutdownCtx, c := context.WithTimeout(context.Background(), 30*time.Second)
 			defer c()
-			_ = srv.Shutdown(shutdownCtx)
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				_ = srv.Close()
+			}
 		}()
 	}
 

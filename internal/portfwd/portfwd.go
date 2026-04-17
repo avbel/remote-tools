@@ -25,11 +25,10 @@ type Spec struct {
 
 // ParseSpec parses a "PORT=HOST:PORT" string.
 func ParseSpec(s string) (Spec, error) {
-	eq := strings.IndexByte(s, '=')
-	if eq <= 0 || eq == len(s)-1 {
+	portStr, target, ok := strings.Cut(s, "=")
+	if !ok || portStr == "" || target == "" {
 		return Spec{}, fmt.Errorf("portfwd: expected PORT=HOST:PORT, got %q", s)
 	}
-	portStr, target := s[:eq], s[eq+1:]
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port <= 0 || port > 65535 {
 		return Spec{}, fmt.Errorf("portfwd: invalid tailnet port %q", portStr)
@@ -91,8 +90,11 @@ func acceptLoop(ln net.Listener, target string) {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			// Transient accept errors (e.g. too many open files): back off
-			// instead of tearing the whole forwarder down.
+			// Transient accept errors (e.g. EMFILE): back off instead of
+			// tearing the forwarder down. Backoff caps at 1s and only
+			// resets on a successful accept, so a permanently broken
+			// listener will log at most once per second until the
+			// process exits.
 			if backoff == 0 {
 				backoff = 5 * time.Millisecond
 			} else if backoff < time.Second {

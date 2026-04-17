@@ -87,11 +87,13 @@ func (n *Node) Shutdown(timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	if lc, err := n.srv.LocalClient(); err == nil {
-		// Best-effort: if Logout fails the ephemeral flag is our fallback.
-		if logoutErr := lc.Logout(ctx); logoutErr != nil && !errors.Is(logoutErr, io.EOF) {
-			log.Printf("tsnode: logout failed (ephemeral GC will clean up): %v", logoutErr)
-		}
+	// Best-effort logout: if it fails (or LocalClient isn't available),
+	// the Ephemeral flag still causes the control plane to GC the node.
+	lc, err := n.srv.LocalClient()
+	if err != nil {
+		log.Printf("tsnode: local client unavailable, skipping logout: %v", err)
+	} else if logoutErr := lc.Logout(ctx); logoutErr != nil && !errors.Is(logoutErr, io.EOF) {
+		log.Printf("tsnode: logout failed (ephemeral GC will clean up): %v", logoutErr)
 	}
 	return n.srv.Close()
 }

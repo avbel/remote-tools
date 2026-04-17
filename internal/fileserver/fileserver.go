@@ -12,12 +12,13 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 )
@@ -104,8 +105,7 @@ func (h *handler) serveFile(w http.ResponseWriter, r *http.Request, full string,
 	defer f.Close()
 
 	if r.URL.Query().Get(queryDownload) == "1" {
-		w.Header().Set("Content-Disposition",
-			fmt.Sprintf("attachment; filename=%q", filepath.Base(full)))
+		w.Header().Set("Content-Disposition", contentDisposition(filepath.Base(full)))
 	}
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
@@ -183,12 +183,14 @@ func (h *handler) serveListing(w http.ResponseWriter, full, urlPath string) {
 		http.Error(w, "readdir error", http.StatusInternalServerError)
 		return
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		di, dj := entries[i].IsDir(), entries[j].IsDir()
-		if di != dj {
-			return di
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int {
+		if a.IsDir() != b.IsDir() {
+			if a.IsDir() {
+				return -1
+			}
+			return 1
 		}
-		return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
+		return strings.Compare(strings.ToLower(a.Name()), strings.ToLower(b.Name()))
 	})
 
 	data := listingData{
@@ -231,13 +233,10 @@ func (h *handler) serveArchive(w http.ResponseWriter, full string) {
 		base = "archive"
 	}
 	w.Header().Set("Content-Type", "application/gzip")
-	w.Header().Set("Content-Disposition",
-		fmt.Sprintf("attachment; filename=%q", base+".tar.gz"))
+	w.Header().Set("Content-Disposition", contentDisposition(base+".tar.gz"))
 
 	gz := gzip.NewWriter(w)
-	defer gz.Close()
 	tw := tar.NewWriter(gz)
-	defer tw.Close()
 
 	err := filepath.WalkDir(full, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -273,28 +272,50 @@ func (h *handler) serveArchive(w http.ResponseWriter, full string) {
 		}
 		hdr.Name = rel
 		if err := tw.WriteHeader(hdr); err != nil {
-			return err // writer is broken; stop
+			return err
 		}
 		if !info.IsDir() {
-			if err := copyFileInto(tw, p); err != nil {
+			if err := copyFileContents(tw, p); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
-	if err != nil {
-		log.Printf("fileserver: archive walk: %v", err)
+
+	// On success, write the tar footer so the archive is complete.
+	// On error, skip Close() intentionally: the client's `tar -xzf` will
+	// then abort loudly on truncated input instead of silently extracting
+	// a partial tree. We still close the gzip stream so the response body
+	// is a valid gzip file (the outer transport shouldn't be blamed).
+	if err == nil {
+		_ = tw.Close()
+	} else {
+		log.Printf("fileserver: archive walk aborted: %v", err)
 	}
+	_ = gz.Close()
 }
 
-func copyFileInto(w io.Writer, path string) error {
+// copyFileContents copies the file at path into w. Unreadable files are
+// skipped (nil error) so one permission-denied file doesn't abort the whole
+// archive; write errors propagate so the caller can abort the tar.
+func copyFileContents(w io.Writer, path string) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil // best-effort: skip unreadable files
+		return nil
 	}
 	defer f.Close()
 	_, err = io.Copy(w, f)
 	return err
+}
+
+// contentDisposition formats an RFC 6266 attachment header. Falls back to
+// RFC 5987 filename* encoding for names mime.FormatMediaType can't represent
+// (e.g. non-ASCII, quotes).
+func contentDisposition(name string) string {
+	if v := mime.FormatMediaType("attachment", map[string]string{"filename": name}); v != "" {
+		return v
+	}
+	return `attachment; filename*=UTF-8''` + url.PathEscape(name)
 }
 
 func humanSize(n int64) string {
