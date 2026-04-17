@@ -1,0 +1,4 @@
+/remote-tools
+/dist/
+*.exe
+*.out
