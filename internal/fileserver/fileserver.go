@@ -29,9 +29,15 @@ const (
 	archiveTGZ    = "tgz"
 )
 
-// New returns an http.Handler exposing root read-only.
+// New returns an http.Handler exposing root read-only. Two endpoints are
+// mounted on the returned mux:
 //
-// Supported query params:
+//   - /        — human-friendly HTML listing + direct file GETs, with
+//                ?download=1 and ?archive=tgz extensions.
+//   - /dav/    — read-only WebDAV, for mounting with Finder, Explorer,
+//                davfs2, rclone, etc.
+//
+// Supported query params on the browser endpoint:
 //
 //	?download=1   -> force Content-Disposition: attachment
 //	?archive=tgz  -> stream the requested directory as a gzip tarball
@@ -47,7 +53,10 @@ func New(root string) (http.Handler, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("fileserver: %q is not a directory", abs)
 	}
-	return &handler{root: abs}, nil
+	mux := http.NewServeMux()
+	mux.Handle(davMountPoint, newWebDAV(abs))
+	mux.Handle("/", &handler{root: abs})
+	return mux, nil
 }
 
 type handler struct {

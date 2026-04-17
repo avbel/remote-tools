@@ -4,7 +4,10 @@ go 1.24.4
 
 toolchain go1.24.7
 
-require tailscale.com v1.86.2
+require (
+	golang.org/x/net v0.40.0
+	tailscale.com v1.86.2
+)
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
@@ -66,7 +69,6 @@ require (
 	golang.org/x/crypto v0.38.0 // indirect
 	golang.org/x/exp v0.0.0-20250210185358-939b2ce775ac // indirect
 	golang.org/x/mod v0.24.0 // indirect
-	golang.org/x/net v0.40.0 // indirect
 	golang.org/x/sync v0.14.0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
 	golang.org/x/term v0.32.0 // indirect

@@ -155,17 +155,40 @@ kill -TERM %1   # or: kill -TERM <pid>
 
 ## File server features
 
-- Directory browsing with sortable listing.
+- Directory browsing with sortable listing at `/`.
 - `?download=1` forces `Content-Disposition: attachment`.
 - `?archive=tgz` on a directory streams a gzip tarball.
 - Range requests (resumable downloads with `curl -C -`).
-- Read-only: only `GET` and `HEAD` are accepted.
+- Read-only **WebDAV** at `/dav/` for mounting in a file manager (see below).
+- Only `GET`/`HEAD`/`OPTIONS`/`PROPFIND` methods are accepted —
+  `PUT`/`DELETE`/`MKCOL`/etc. are rejected with 405.
 - Served **only** on the tailnet listener — nothing is bound to public
   interfaces on the VPS.
 - Concurrent by default: each accepted connection is handled in its own
   goroutine, so multiple parallel downloads (e.g. from a download manager
   with segmented downloads, or several clients at once) don't block each
   other.
+
+## Mounting as a read-only WebDAV share
+
+The same directory is exposed over read-only WebDAV at
+`http://<hostname>:8080/dav/`. Any WebDAV client works — since WebDAV is
+read-only, attempts to write return 405.
+
+```sh
+# rclone (works on Linux/macOS/Windows)
+rclone config create vps webdav url=http://remote-tools-<vps>:8080/dav/ vendor=other
+rclone ls vps:
+
+# Linux: mount with davfs2
+sudo mount -t davfs http://remote-tools-<vps>:8080/dav/ /mnt/vps
+
+# macOS Finder: Cmd-K, then enter
+#   http://remote-tools-<vps>:8080/dav/
+
+# Windows Explorer:
+net use Z: http://remote-tools-<vps>:8080/dav/
+```
 
 ## Zero-trace guarantees
 
