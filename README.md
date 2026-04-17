@@ -21,16 +21,43 @@ garbage-collected by the control plane.
 
 ## Installation
 
-Download the latest release binary and make it executable:
+One-liner — download the latest linux/amd64 build and make it executable:
 
 ```sh
-curl -L https://github.com/avbel/remote-tools/releases/latest/download/remote-tools-linux-amd64 \
-  -o remote-tools
-chmod +x remote-tools
+curl -fsSL -o remote-tools \
+  https://github.com/avbel/remote-tools/releases/latest/download/remote-tools-linux-amd64 \
+  && chmod +x remote-tools
+```
+
+Pin a specific version (recommended for reproducible runs):
+
+```sh
+VERSION=v0.1.0
+curl -fsSL -o remote-tools \
+  "https://github.com/avbel/remote-tools/releases/download/${VERSION}/remote-tools-linux-amd64" \
+  && chmod +x remote-tools
+```
+
+Verify the checksum published alongside the binary:
+
+```sh
+curl -fsSL -o remote-tools.sha256 \
+  https://github.com/avbel/remote-tools/releases/latest/download/remote-tools-linux-amd64.sha256
+sha256sum -c remote-tools.sha256
+```
+
+Run straight from `/tmp` if you want to keep your working directory clean
+(nothing else touches disk outside `/tmp` anyway):
+
+```sh
+curl -fsSL -o /tmp/remote-tools \
+  https://github.com/avbel/remote-tools/releases/latest/download/remote-tools-linux-amd64 \
+  && chmod +x /tmp/remote-tools \
+  && /tmp/remote-tools --ts-authkey=tskey-... --serve-dir=/var/log
 ```
 
 That's the whole install. There is nothing to configure, no package to
-install, no daemon to register.
+install, no daemon to register. `rm /tmp/remote-tools` when you're done.
 
 ## Quick start
 
