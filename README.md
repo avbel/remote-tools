@@ -71,6 +71,49 @@ Stop it with `Ctrl-C`. The node is removed from the Tailscale admin list
 right away, `/tmp/remote-tools-*` is wiped, and you can `rm remote-tools` to
 leave no trace.
 
+## Running detached via `systemd-run`
+
+If you don't want to hold a terminal open (or you're on a flaky SSH
+connection), `systemd-run --user` starts `remote-tools` as a transient
+user-level service — still **no root, no unit files on disk** — and stops
+it cleanly on demand, which in turn triggers the tailnet logout.
+
+```sh
+# Start as a transient user service.
+systemd-run --user \
+  --unit=remote-tools \
+  --collect \
+  --property=Environment=TS_AUTHKEY=tskey-... \
+  $(pwd)/remote-tools --serve-dir=/var/log
+
+# Follow logs.
+journalctl --user -u remote-tools -f
+
+# Stop it (sends SIGTERM -> graceful Logout -> node removed from admin list).
+systemctl --user stop remote-tools
+```
+
+Notes:
+
+- `--collect` makes systemd forget the unit as soon as it exits, so nothing
+  lingers in the user manager's state.
+- Passing the auth key via `Environment=` keeps it out of `ps`/command-line
+  history; `--ts-authkey=` works too if you prefer.
+- `loginctl enable-linger <user>` once, if you want the service to survive
+  logout on a host where your user has no persistent session.
+- Running without `--user` (i.e. system-wide) would require root and
+  defeats the zero-privilege story — stick to `--user`.
+
+If systemd-run is unavailable, the portable alternative is:
+
+```sh
+TS_AUTHKEY=tskey-... nohup ./remote-tools --serve-dir=/var/log >/tmp/remote-tools.log 2>&1 &
+# later
+kill -TERM %1   # or: kill -TERM <pid>
+```
+
+`SIGTERM` triggers the same graceful Logout as `Ctrl-C`.
+
 ## Flags
 
 | Flag | Env var | Default | Description |
