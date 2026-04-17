@@ -43,8 +43,7 @@ func Start(ctx context.Context, cfg Config) (*Node, error) {
 
 	logf := cfg.Logf
 	if logf == nil {
-		// Silence tsnet's chatty internal logger by default.
-		logf = func(string, ...any) {}
+		logf = func(string, ...any) {} // silence tsnet's chatty internal logger
 	}
 
 	srv := &tsnet.Server{
@@ -68,27 +67,17 @@ func (n *Node) Listen(network, addr string) (net.Listener, error) {
 	return n.srv.Listen(network, addr)
 }
 
-// Dial opens a TCP connection on the tailnet.
-func (n *Node) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
-	return n.srv.Dial(ctx, network, addr)
-}
-
-// TailnetIPs returns the node's tailnet IPs, useful for logging.
-func (n *Node) TailnetIPs() ([]string, error) {
-	st, err := n.srv.Up(context.Background())
-	if err != nil {
-		return nil, err
+// TailnetIPs returns the node's tailnet IPs as strings, for logging.
+func (n *Node) TailnetIPs() []string {
+	ip4, ip6 := n.srv.TailscaleIPs()
+	var out []string
+	if ip4.IsValid() {
+		out = append(out, ip4.String())
 	}
-	out := make([]string, 0, len(st.TailscaleIPs))
-	for _, ip := range st.TailscaleIPs {
-		out = append(out, ip.String())
+	if ip6.IsValid() {
+		out = append(out, ip6.String())
 	}
-	return out, nil
-}
-
-// Hostname returns the tailnet hostname assigned to this node.
-func (n *Node) Hostname() string {
-	return n.srv.Hostname
+	return out
 }
 
 // Shutdown deregisters the node from the tailnet (via Logout) and closes the
@@ -98,8 +87,7 @@ func (n *Node) Shutdown(timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	lc, err := n.srv.LocalClient()
-	if err == nil {
+	if lc, err := n.srv.LocalClient(); err == nil {
 		// Best-effort: if Logout fails the ephemeral flag is our fallback.
 		if logoutErr := lc.Logout(ctx); logoutErr != nil && !errors.Is(logoutErr, io.EOF) {
 			log.Printf("tsnode: logout failed (ephemeral GC will clean up): %v", logoutErr)

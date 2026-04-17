@@ -17,10 +17,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"tailscale.com/util/dnsname"
 
 	"github.com/avbel/remote-tools/internal/fileserver"
 	"github.com/avbel/remote-tools/internal/portfwd"
@@ -35,8 +38,6 @@ type stringSlice []string
 func (s *stringSlice) String() string     { return strings.Join(*s, ",") }
 func (s *stringSlice) Set(v string) error { *s = append(*s, v); return nil }
 
-// envDefault returns the first non-empty value among the provided env vars,
-// falling back to def.
 func envDefault(def string, keys ...string) string {
 	for _, k := range keys {
 		if v := os.Getenv(k); v != "" {
@@ -44,6 +45,15 @@ func envDefault(def string, keys ...string) string {
 		}
 	}
 	return def
+}
+
+type config struct {
+	AuthKey   string
+	Hostname  string
+	ServeDir  string
+	ServePort int
+	Specs     []portfwd.Spec
+	Verbose   bool
 }
 
 func main() {
@@ -87,7 +97,7 @@ Examples:
 		"Directory to expose read-only over HTTP; empty disables the file server")
 	servePortDefault := 8080
 	if v := envDefault("", "REMOTE_TOOLS_SERVE_PORT"); v != "" {
-		if p, err := atoiStrict(v); err == nil {
+		if p, err := strconv.Atoi(v); err == nil {
 			servePortDefault = p
 		}
 	}
@@ -125,13 +135,20 @@ Examples:
 		specs = append(specs, s)
 	}
 
-	if err := run(*authKey, *hostname, *serveDir, *servePort, specs, *verbose); err != nil {
+	cfg := config{
+		AuthKey:   *authKey,
+		Hostname:  *hostname,
+		ServeDir:  *serveDir,
+		ServePort: *servePort,
+		Specs:     specs,
+		Verbose:   *verbose,
+	}
+	if err := run(cfg); err != nil {
 		log.Fatalf("remote-tools: %v", err)
 	}
 }
 
-func run(authKey, hostname, serveDir string, servePort int, specs []portfwd.Spec, verbose bool) error {
-	// /tmp-only state dir, wiped on exit no matter how we leave.
+func run(cfg config) error {
 	stateDir, err := os.MkdirTemp("", "remote-tools-*")
 	if err != nil {
 		return fmt.Errorf("create tmp state dir: %w", err)
@@ -143,61 +160,49 @@ func run(authKey, hostname, serveDir string, servePort int, specs []portfwd.Spec
 	}()
 	log.Printf("state dir: %s (will be removed on exit)", stateDir)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	// Catch SIGINT/SIGTERM so we trigger orderly shutdown (and Logout).
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		s := <-sigCh
-		log.Printf("received %s, shutting down...", s)
-		cancel()
-	}()
-
-	cfg := tsnode.Config{
-		AuthKey:  authKey,
-		Hostname: hostname,
+	tsCfg := tsnode.Config{
+		AuthKey:  cfg.AuthKey,
+		Hostname: cfg.Hostname,
 		Dir:      stateDir,
 	}
-	if verbose {
-		cfg.Logf = log.Printf
+	if cfg.Verbose {
+		tsCfg.Logf = log.Printf
 	}
 
 	bringUpCtx, bringUpCancel := context.WithTimeout(ctx, 60*time.Second)
-	node, err := tsnode.Start(bringUpCtx, cfg)
+	node, err := tsnode.Start(bringUpCtx, tsCfg)
 	bringUpCancel()
 	if err != nil {
 		return fmt.Errorf("tailscale: %w", err)
 	}
-	if ips, err := node.TailnetIPs(); err == nil {
-		log.Printf("tailnet up: hostname=%s ips=%s", node.Hostname(), strings.Join(ips, ","))
+	if ips := node.TailnetIPs(); len(ips) > 0 {
+		log.Printf("tailnet up: hostname=%s ips=%s", cfg.Hostname, strings.Join(ips, ","))
 	}
 
 	var wg sync.WaitGroup
 	runErr := make(chan error, 2)
 
-	if serveDir != "" {
-		handler, err := fileserver.New(serveDir)
+	if cfg.ServeDir != "" {
+		handler, err := fileserver.New(cfg.ServeDir)
 		if err != nil {
 			_ = node.Shutdown(5 * time.Second)
 			return err
 		}
-		ln, err := node.Listen("tcp", fmt.Sprintf(":%d", servePort))
+		ln, err := node.Listen("tcp", fmt.Sprintf(":%d", cfg.ServePort))
 		if err != nil {
 			_ = node.Shutdown(5 * time.Second)
-			return fmt.Errorf("listen on tailnet :%d: %w", servePort, err)
+			return fmt.Errorf("listen on tailnet :%d: %w", cfg.ServePort, err)
 		}
-		// http.Server dispatches each accepted connection in its own
-		// goroutine, so parallel downloads from multiple clients (or a
-		// single client opening multiple connections) run concurrently
-		// without any extra work on our side. We intentionally do NOT
-		// set WriteTimeout so long-running downloads aren't cut off.
+		// No WriteTimeout so long downloads aren't cut off; http.Server
+		// already dispatches each connection in its own goroutine.
 		srv := &http.Server{
 			Handler:           handler,
 			ReadHeaderTimeout: 10 * time.Second,
 		}
-		log.Printf("file server: http://%s:%d/ (dir=%s)", hostname, servePort, serveDir)
+		log.Printf("file server: http://%s:%d/ (dir=%s)", cfg.Hostname, cfg.ServePort, cfg.ServeDir)
 
 		wg.Add(1)
 		go func() {
@@ -206,7 +211,6 @@ func run(authKey, hostname, serveDir string, servePort int, specs []portfwd.Spec
 				runErr <- fmt.Errorf("file server: %w", err)
 			}
 		}()
-		// Ensure the HTTP server is stopped when ctx is cancelled.
 		go func() {
 			<-ctx.Done()
 			shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
@@ -215,17 +219,16 @@ func run(authKey, hostname, serveDir string, servePort int, specs []portfwd.Spec
 		}()
 	}
 
-	if len(specs) > 0 {
+	if len(cfg.Specs) > 0 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := portfwd.Run(ctx, node, specs); err != nil {
+			if err := portfwd.Run(ctx, node, cfg.Specs); err != nil {
 				runErr <- fmt.Errorf("portfwd: %w", err)
 			}
 		}()
 	}
 
-	// Wait for either a fatal runtime error or shutdown signal.
 	go func() {
 		wg.Wait()
 		close(runErr)
@@ -236,10 +239,9 @@ func run(authKey, hostname, serveDir string, servePort int, specs []portfwd.Spec
 		if exitErr == nil {
 			exitErr = err
 		}
-		cancel()
+		stop() // cancel the signal-linked ctx so the other goroutines wind down
 	}
 
-	// Orderly Logout so the node is removed from the admin list immediately.
 	log.Printf("logging out of tailnet...")
 	if err := node.Shutdown(10 * time.Second); err != nil {
 		log.Printf("tailscale shutdown: %v", err)
@@ -247,35 +249,13 @@ func run(authKey, hostname, serveDir string, servePort int, specs []portfwd.Spec
 	return exitErr
 }
 
+// defaultHostname builds the default tailnet hostname from the machine's
+// hostname, sanitised into a DNS label.
 func defaultHostname() string {
-	h, err := os.Hostname()
-	if err != nil || h == "" {
+	h, _ := os.Hostname()
+	h = dnsname.SanitizeHostname(h)
+	if h == "" {
 		return "remote-tools"
 	}
-	// Keep only a safe subset for DNS-ish use.
-	var b strings.Builder
-	for _, r := range strings.ToLower(h) {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
-			b.WriteRune(r)
-		}
-	}
-	if b.Len() == 0 {
-		return "remote-tools"
-	}
-	return "remote-tools-" + b.String()
-}
-
-func atoiStrict(s string) (int, error) {
-	n := 0
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return 0, fmt.Errorf("invalid integer %q", s)
-		}
-		n = n*10 + int(r-'0')
-	}
-	if s == "" {
-		return 0, fmt.Errorf("empty integer")
-	}
-	return n, nil
+	return "remote-tools-" + h
 }

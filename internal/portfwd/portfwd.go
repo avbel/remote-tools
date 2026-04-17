@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Spec struct {
@@ -39,26 +40,23 @@ func ParseSpec(s string) (Spec, error) {
 	return Spec{TailnetPort: port, Target: target}, nil
 }
 
-// Listener is the subset of the tsnet node we need.
-type Listener interface {
+// TailnetListener is the subset of the tsnet node we need.
+type TailnetListener interface {
 	Listen(network, addr string) (net.Listener, error)
 }
 
-// Run starts one forwarder per spec. It returns when ctx is cancelled, closing
-// all listeners. The returned error is the first fatal listener error, if any.
-func Run(ctx context.Context, l Listener, specs []Spec) error {
+// Run starts one forwarder per spec. It returns when ctx is cancelled, after
+// all accept loops and in-flight connections have shut down. The returned
+// error, if any, is the first fatal setup error (Listen failure).
+func Run(ctx context.Context, l TailnetListener, specs []Spec) error {
 	if len(specs) == 0 {
 		return nil
 	}
 
-	var wg sync.WaitGroup
-	errCh := make(chan error, len(specs))
 	listeners := make([]net.Listener, 0, len(specs))
-
 	for _, s := range specs {
 		ln, err := l.Listen("tcp", fmt.Sprintf(":%d", s.TailnetPort))
 		if err != nil {
-			// Close anything we opened already.
 			for _, prev := range listeners {
 				_ = prev.Close()
 			}
@@ -66,22 +64,15 @@ func Run(ctx context.Context, l Listener, specs []Spec) error {
 		}
 		listeners = append(listeners, ln)
 		log.Printf("portfwd: tailnet :%d -> %s", s.TailnetPort, s.Target)
+	}
 
+	var wg sync.WaitGroup
+	for i, ln := range listeners {
 		wg.Add(1)
 		go func(ln net.Listener, target string) {
 			defer wg.Done()
-			for {
-				conn, err := ln.Accept()
-				if err != nil {
-					if errors.Is(err, net.ErrClosed) {
-						return
-					}
-					errCh <- err
-					return
-				}
-				go handle(conn, target)
-			}
-		}(ln, s.Target)
+			acceptLoop(ln, target)
+		}(ln, specs[i].Target)
 	}
 
 	<-ctx.Done()
@@ -89,12 +80,30 @@ func Run(ctx context.Context, l Listener, specs []Spec) error {
 		_ = ln.Close()
 	}
 	wg.Wait()
+	return nil
+}
 
-	select {
-	case err := <-errCh:
-		return err
-	default:
-		return nil
+func acceptLoop(ln net.Listener, target string) {
+	var backoff time.Duration
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			// Transient accept errors (e.g. too many open files): back off
+			// instead of tearing the whole forwarder down.
+			if backoff == 0 {
+				backoff = 5 * time.Millisecond
+			} else if backoff < time.Second {
+				backoff *= 2
+			}
+			log.Printf("portfwd: accept on %s: %v (retrying in %s)", target, err, backoff)
+			time.Sleep(backoff)
+			continue
+		}
+		backoff = 0
+		go handle(conn, target)
 	}
 }
 
@@ -107,8 +116,18 @@ func handle(src net.Conn, target string) {
 	}
 	defer dst.Close()
 
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(dst, src); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(src, dst); done <- struct{}{} }()
-	<-done
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = io.Copy(dst, src); _ = closeWrite(dst) }()
+	go func() { defer wg.Done(); _, _ = io.Copy(src, dst); _ = closeWrite(src) }()
+	wg.Wait()
+}
+
+// closeWrite half-closes a TCP connection so the peer sees EOF on its read
+// side, letting it drain and close its own direction cleanly.
+func closeWrite(c net.Conn) error {
+	if cw, ok := c.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
 }

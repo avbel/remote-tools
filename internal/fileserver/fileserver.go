@@ -11,13 +11,21 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+)
+
+const (
+	queryDownload = "download"
+	queryArchive  = "archive"
+	archiveTGZ    = "tgz"
 )
 
 // New returns an http.Handler exposing root read-only.
@@ -52,10 +60,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Normalise and resolve the request path inside the root.
 	urlPath := path.Clean("/" + r.URL.Path)
 	full := filepath.Join(h.root, filepath.FromSlash(urlPath))
-	// Defence in depth: make sure we never leave the root.
+	// Defence in depth: http.Dir also blocks traversal, but belt-and-braces.
 	rel, err := filepath.Rel(h.root, full)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -73,16 +80,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if info.IsDir() {
-		if r.URL.Query().Get("archive") == "tgz" {
-			h.serveArchive(w, r, full, urlPath)
+		if r.URL.Query().Get(queryArchive) == archiveTGZ {
+			h.serveArchive(w, full)
 			return
 		}
-		// Ensure trailing slash so relative links resolve correctly.
 		if !strings.HasSuffix(r.URL.Path, "/") {
 			http.Redirect(w, r, r.URL.Path+"/", http.StatusMovedPermanently)
 			return
 		}
-		h.serveListing(w, r, full, urlPath)
+		h.serveListing(w, full, urlPath)
 		return
 	}
 
@@ -97,11 +103,10 @@ func (h *handler) serveFile(w http.ResponseWriter, r *http.Request, full string,
 	}
 	defer f.Close()
 
-	if r.URL.Query().Get("download") == "1" {
+	if r.URL.Query().Get(queryDownload) == "1" {
 		w.Header().Set("Content-Disposition",
 			fmt.Sprintf("attachment; filename=%q", filepath.Base(full)))
 	}
-	// http.ServeContent handles Range, If-Modified-Since, and Content-Type.
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
 
@@ -109,7 +114,6 @@ type listingEntry struct {
 	Name     string
 	Href     string
 	IsDir    bool
-	Size     int64
 	SizeHR   string
 	Modified string
 }
@@ -166,7 +170,7 @@ var listingTmpl = template.Must(template.New("listing").Parse(`<!doctype html>
 </html>
 `))
 
-func (h *handler) serveListing(w http.ResponseWriter, r *http.Request, full, urlPath string) {
+func (h *handler) serveListing(w http.ResponseWriter, full, urlPath string) {
 	f, err := os.Open(full)
 	if err != nil {
 		http.Error(w, "open error", http.StatusInternalServerError)
@@ -187,7 +191,10 @@ func (h *handler) serveListing(w http.ResponseWriter, r *http.Request, full, url
 		return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
 	})
 
-	data := listingData{Path: urlPath}
+	data := listingData{
+		Path:    urlPath,
+		Entries: make([]listingEntry, 0, len(entries)),
+	}
 	if urlPath != "/" {
 		data.Parent = path.Dir(strings.TrimRight(urlPath, "/")) + "/"
 		if data.Parent == "//" {
@@ -200,7 +207,7 @@ func (h *handler) serveListing(w http.ResponseWriter, r *http.Request, full, url
 			continue
 		}
 		name := e.Name()
-		href := (&url{Path: name}).escape()
+		href := url.PathEscape(name)
 		if e.IsDir() {
 			href += "/"
 		}
@@ -208,16 +215,17 @@ func (h *handler) serveListing(w http.ResponseWriter, r *http.Request, full, url
 			Name:     name,
 			Href:     href,
 			IsDir:    e.IsDir(),
-			Size:     info.Size(),
 			SizeHR:   humanSize(info.Size()),
 			Modified: info.ModTime().Format(time.RFC3339),
 		})
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = listingTmpl.Execute(w, data)
+	if err := listingTmpl.Execute(w, data); err != nil {
+		log.Printf("fileserver: listing template: %v", err)
+	}
 }
 
-func (h *handler) serveArchive(w http.ResponseWriter, r *http.Request, full, urlPath string) {
+func (h *handler) serveArchive(w http.ResponseWriter, full string) {
 	base := filepath.Base(full)
 	if base == "." || base == "/" || base == "" {
 		base = "archive"
@@ -231,17 +239,17 @@ func (h *handler) serveArchive(w http.ResponseWriter, r *http.Request, full, url
 	tw := tar.NewWriter(gz)
 	defer tw.Close()
 
-	_ = filepath.WalkDir(full, func(p string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(full, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip unreadable entries silently
 		}
-		// Skip anything that isn't a regular file or directory; in particular,
-		// skip symlinks so we never escape the root.
 		info, err := d.Info()
 		if err != nil {
 			return nil
 		}
 		mode := info.Mode()
+		// Skip symlinks so we never escape the root; skip anything that's
+		// not a regular file or directory.
 		if mode&fs.ModeSymlink != 0 {
 			return nil
 		}
@@ -268,15 +276,25 @@ func (h *handler) serveArchive(w http.ResponseWriter, r *http.Request, full, url
 			return err // writer is broken; stop
 		}
 		if !info.IsDir() {
-			f, err := os.Open(p)
-			if err != nil {
-				return nil
+			if err := copyFileInto(tw, p); err != nil {
+				return err
 			}
-			_, _ = io.Copy(tw, f)
-			f.Close()
 		}
 		return nil
 	})
+	if err != nil {
+		log.Printf("fileserver: archive walk: %v", err)
+	}
+}
+
+func copyFileInto(w io.Writer, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil // best-effort: skip unreadable files
+	}
+	defer f.Close()
+	_, err = io.Copy(w, f)
+	return err
 }
 
 func humanSize(n int64) string {
@@ -290,31 +308,4 @@ func humanSize(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
-}
-
-// url is a small helper for per-segment URL escaping in links. Using
-// net/url.URL would also pull in query parsing on every render; this is
-// simpler and avoids re-escaping slashes.
-type url struct{ Path string }
-
-func (u *url) escape() string {
-	// Escape per-segment; callers pass a single segment name.
-	return (&urlSegment{u.Path}).String()
-}
-
-type urlSegment struct{ s string }
-
-func (u *urlSegment) String() string {
-	var b strings.Builder
-	for _, r := range u.s {
-		switch {
-		case r == '/' || r == '?' || r == '#':
-			fmt.Fprintf(&b, "%%%02X", r)
-		case r <= 0x20 || r == 0x7f:
-			fmt.Fprintf(&b, "%%%02X", r)
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
