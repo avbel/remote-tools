@@ -1,6 +1,7 @@
 # remote-tools
-
-<img src="assets/logo.png" width="300" align="center" alt="remote-tools logo">
+<p align="center">
+<img src="assets/logo.png" width="300" alt="remote-tools logo">
+</p>
 
 A single static binary for short-lived DevOps and testing work on remote
 VPSes. Download it, run it, do your work, stop it, delete it — no root, no
