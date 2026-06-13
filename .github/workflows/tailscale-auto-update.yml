@@ -1,0 +1,98 @@
+name: tailscale-auto-update
+
+# Checks for a newer Tailscale release once a month (and on demand). When one
+# exists it updates the dependency, builds, runs the tests, and — only if all
+# of that succeeds — commits to main and pushes a new patch-bumped tag. The tag
+# push is what drives the existing `release.yml` workflow.
+on:
+  schedule:
+    # 06:00 UTC on the 1st of every month.
+    - cron: '0 6 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + tags so we can compute the next release tag, and a
+          # token that, if RELEASE_PAT is configured, lets the tag push trigger
+          # release.yml (the default GITHUB_TOKEN cannot trigger other
+          # workflows).
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          check-latest: true
+
+      - name: Check for newer Tailscale version
+        id: check
+        run: |
+          set -euo pipefail
+          current=$(go list -m -f '{{.Version}}' tailscale.com)
+          # Newest stable release (skip pre-releases like v1.97.0-pre).
+          latest=$(go list -m -versions tailscale.com \
+            | tr ' ' '\n' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -1)
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if [ "$current" = "$latest" ]; then
+            echo "Already on the latest version ($current)."
+            echo "update=false" >> "$GITHUB_OUTPUT"
+          elif [ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)" = "$latest" ]; then
+            echo "Newer version available: $current -> $latest"
+            echo "update=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Current ($current) is ahead of resolved latest ($latest); nothing to do."
+            echo "update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update dependency
+        if: steps.check.outputs.update == 'true'
+        run: |
+          set -euo pipefail
+          go get "tailscale.com@${{ steps.check.outputs.latest }}"
+          go mod tidy
+
+      - name: Build
+        if: steps.check.outputs.update == 'true'
+        run: go build ./...
+
+      - name: Test
+        if: steps.check.outputs.update == 'true'
+        run: go test ./...
+
+      - name: Commit, tag and push
+        if: steps.check.outputs.update == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add go.mod go.sum
+          git commit -m "Update Tailscale to ${{ steps.check.outputs.latest }}"
+
+          # Find the highest existing vMAJOR.MINOR.PATCH tag and bump the patch.
+          latest_tag=$(git tag --sort=-v:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | head -1 || true)
+          latest_tag="${latest_tag:-v0.0.0}"
+          ver="${latest_tag#v}"
+          major="${ver%%.*}"
+          rest="${ver#*.}"
+          minor="${rest%%.*}"
+          patch="${rest#*.}"
+          new_tag="v${major}.${minor}.$((patch + 1))"
+          echo "Bumping ${latest_tag} -> ${new_tag}"
+
+          git push origin HEAD:main
+          git tag "$new_tag"
+          git push origin "$new_tag"
