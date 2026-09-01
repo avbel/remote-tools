@@ -1,10 +1,10 @@
 module github.com/avbel/remote-tools
 
-go 1.26.5
+go 1.26.6
 
 require (
 	golang.org/x/net v0.56.0
-	tailscale.com v1.102.1
+	tailscale.com v1.102.3
 )
 
 require (
